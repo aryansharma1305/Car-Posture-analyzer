@@ -1,0 +1,15 @@
+{
+  "session_duration_minutes": 0.8,
+  "posture_durations": {
+    "Unknown": 0.7,
+    "Standing": 0.1,
+    "Sitting": 0.0,
+    "Squatting": 0.0
+  },
+  "average_quality_score": 63.9,
+  "risk_distribution": {
+    "Medium": 100
+  },
+  "total_samples": 100,
+  "break_reminders_given": 0
+}

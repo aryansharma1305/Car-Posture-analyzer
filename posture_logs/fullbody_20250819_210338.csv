@@ -1,0 +1,8 @@
+t_sec,body_state,upper_body,lower_visible,lean_side,trunk_deg,neck_deg,knee_L,knee_R,hip_L,hip_R
+1.02,Unknown,RaisedShoulders,False,,1.2,6.9,179.2,177.8,168.7,179.6
+3.0,Unknown,Neutral,False,,0.8,7.9,178.3,177.6,168.0,179.1
+6.0,Unknown,Neutral,False,,0.9,1.8,177.9,179.0,173.7,174.9
+7.0,Unknown,ForwardHead,False,,0.8,25.0,178.8,178.7,171.3,176.0
+9.02,Unknown,Neutral,False,,0.2,8.5,178.4,178.1,170.8,179.0
+10.0,Unknown,ForwardHead,False,,3.3,21.0,178.1,179.6,173.1,174.2
+11.0,Unknown,Neutral,False,,2.6,5.4,177.7,179.7,173.8,174.0

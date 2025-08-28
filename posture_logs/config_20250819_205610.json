@@ -1,0 +1,12 @@
+{
+  "detection_confidence": 0.6,
+  "tracking_confidence": 0.6,
+  "smoothing_alpha": 0.25,
+  "break_interval_minutes": 30,
+  "quality_threshold_good": 80,
+  "quality_threshold_warning": 60,
+  "logging_interval_seconds": 1.0,
+  "save_visualizations": true,
+  "alert_poor_posture": true,
+  "max_session_duration_hours": 4
+}

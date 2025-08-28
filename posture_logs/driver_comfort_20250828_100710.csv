@@ -1,0 +1,6 @@
+timestamp,body_state,upper_body,trunk_deg,neck_deg,knee_L,knee_R,hip_L,hip_R,comfort_score,comfort_category,posture_quality,ergonomic_risk,fatigue_indicator
+1.0,Unknown,Neutral,4.0,13.1,177.5,175.2,172.5,179.4,82.3,Good,73.0,0,21.1
+2.0,Unknown,Neutral,1.6,14.7,177.8,175.3,172.3,179.8,81.0,Good,73.0,0,27.3
+6.0,Unknown,Neutral,2.4,4.7,179.7,177.4,173.3,179.7,85.2,Excellent,72.5,0,5.1
+7.01,Unknown,Neutral,1.9,0.5,179.2,177.4,173.8,179.4,84.8,Good,72.5,0,7.1
+8.0,Unknown,Neutral,2.9,3.3,179.1,176.7,173.7,179.1,83.4,Good,72.6,0,14.4

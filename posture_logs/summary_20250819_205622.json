@@ -1,0 +1,12 @@
+{
+  "session_duration_minutes": 0.2,
+  "posture_durations": {
+    "Unknown": 0.2
+  },
+  "average_quality_score": 65.3,
+  "risk_distribution": {
+    "Medium": 100
+  },
+  "total_samples": 100,
+  "break_reminders_given": 0
+}
