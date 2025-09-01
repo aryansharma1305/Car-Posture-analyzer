@@ -1,0 +1,3 @@
+timestamp,body_state,upper_body,trunk_deg,neck_deg,knee_L,knee_R,hip_L,hip_R,comfort_score,comfort_category,posture_quality,ergonomic_risk,fatigue_indicator
+1.03,Unknown,RaisedShoulders,0.4,7.6,175.4,178.5,178.7,176.9,86.3,Excellent,72.5,0,0
+2.05,Unknown,RaisedShoulders,0.4,12.0,167.4,174.4,173.5,172.0,84.5,Good,75.2,0,15.5

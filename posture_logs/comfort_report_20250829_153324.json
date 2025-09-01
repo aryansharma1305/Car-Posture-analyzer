@@ -1,0 +1,49 @@
+{
+  "session_info": {
+    "duration": 7.264999999999418,
+    "driver_id": "test_driver",
+    "seat_type": "test_seat",
+    "session_id": "20250829_153324"
+  },
+  "summary": {
+    "total_duration_minutes": 0.1,
+    "average_comfort": 85.4,
+    "comfort_std": 1.7,
+    "min_comfort": 81.8,
+    "max_comfort": 88.6,
+    "final_comfort_category": "Excellent"
+  },
+  "detailed_scores": {
+    "posture_quality": {
+      "average": 75.4,
+      "trend": "stable"
+    },
+    "ergonomic_risk": {
+      "average": 0.0,
+      "trend": "stable"
+    },
+    "fatigue_indicator": {
+      "average": 11.6,
+      "trend": "increasing"
+    }
+  },
+  "comfort_trend": {
+    "trend": "stable",
+    "description": "Comfort remained relatively stable",
+    "quarterly_scores": [
+      86.1,
+      83.9,
+      86.9,
+      84.7
+    ]
+  },
+  "recommendations": [
+    "Maintain current posture - good driving position detected"
+  ],
+  "seat_analysis": {
+    "current_seat": 85.1937613246557,
+    "standard_seat": 65,
+    "premium_seat": 85
+  },
+  "data_points": 50
+}
