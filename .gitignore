@@ -34,3 +34,13 @@ Thumbs.db
 *.dll
 *.so
 *.dylib
+
+# graphify knowledge-graph output (regenerate with /graphify)
+graphify-out/
+
+# Migrated session logs are derived from the committed originals.
+# Regenerate with: python3 migrate_logs.py --apply
+posture_logs/migrated/
+
+# pytest
+.pytest_cache/
