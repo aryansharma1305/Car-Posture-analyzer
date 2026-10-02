@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,6 +8,25 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from posture_scoring import PostureScore, score_posture
 
+_SESSION_STAMP_RE = re.compile(r"_(\d{8})_(\d{6})$")
+
+
+def session_timestamp_from_name(stem: str) -> Optional[pd.Timestamp]:
+    """Parse the trailing _YYYYMMDD_HHMMSS stamp every log filename carries.
+
+    Anchored at the end of the stem so arbitrary prefixes work:
+    'driver_comfort_20250829_153444' and 'angles_20250811_082025' both parse.
+    Returns None when no stamp is present, so callers can report the file.
+    """
+    m = _SESSION_STAMP_RE.search(stem)
+    if not m:
+        return None
+    try:
+        return pd.to_datetime(m.group(1) + m.group(2), format="%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+
+
 class PostureAnalytics:
     """Analyzes posture data and generates comprehensive reports."""
     
@@ -15,43 +35,114 @@ class PostureAnalytics:
         self.data_dir.mkdir(exist_ok=True)
         
     def load_session_data(self, session_file: str) -> pd.DataFrame:
-        """Load data from a specific session file."""
+        """Load one session file, normalised to a single time schema.
+
+        Guarantees both 't_sec' (seconds from session start) and 'timestamp'
+        (absolute datetime) whichever historical writer produced the file, so
+        callers never have to ask which column means what. See
+        _normalise_time_columns for the per-schema handling.
+        """
         file_path = self.data_dir / session_file
         if not file_path.exists():
             raise FileNotFoundError(f"Session file not found: {session_file}")
-        
+
         df = pd.read_csv(file_path)
-        
-        # Add timestamp column if not present
-        if 'timestamp' not in df.columns and 't_sec' in df.columns:
-            df['timestamp'] = pd.to_datetime('now') - pd.to_timedelta(df['t_sec'], unit='s')
-        
-        return df
+        if df.empty:
+            return df
+
+        session_date = session_timestamp_from_name(file_path.stem)
+        if session_date is None:
+            # No filename stamp to anchor against. Relative durations still
+            # work; only the absolute clock time is arbitrary.
+            session_date = pd.Timestamp.now().normalize()
+
+        normalised = self._normalise_time_columns(df, session_date)
+        return normalised if normalised is not None else df
     
     def load_all_sessions(self, pattern: str = "*.csv") -> pd.DataFrame:
-        """Load and combine data from all session files."""
+        """Load and combine data from all session files.
+
+        Session logs exist in several historical schemas: some carry 't_sec'
+        only, some an ISO 'timestamp' plus 't_sec', and some a numeric
+        'timestamp' column that actually holds seconds since session start.
+        All are normalised here to 't_sec' (float seconds) plus 'timestamp'
+        (absolute datetime) so downstream code sees one shape.
+
+        Files that cannot be normalised are reported, not silently dropped.
+        """
         all_data = []
-        
-        for file_path in self.data_dir.glob(pattern):
+        failures = []
+
+        for file_path in sorted(self.data_dir.glob(pattern)):
+            session_date = session_timestamp_from_name(file_path.stem)
+            if session_date is None:
+                failures.append((file_path.name, "filename has no _YYYYMMDD_HHMMSS stamp"))
+                continue
+
             try:
                 df = pd.read_csv(file_path)
-                df['session_file'] = file_path.name
-                df['session_date'] = pd.to_datetime(file_path.stem.split('_')[1:3], format='%Y%m%d_%H%M%S')
-                
-                # Add timestamp if t_sec is present
-                if 't_sec' in df.columns:
-                    df['timestamp'] = df['session_date'] + pd.to_timedelta(df['t_sec'], unit='s')
-                
-                all_data.append(df)
             except Exception as e:
-                print(f"Warning: Could not load {file_path}: {e}")
-        
+                failures.append((file_path.name, f"unreadable: {e}"))
+                continue
+
+            if df.empty:
+                failures.append((file_path.name, "no rows"))
+                continue
+
+            df['session_file'] = file_path.name
+            df['session_date'] = session_date
+
+            normalised = self._normalise_time_columns(df, session_date)
+            if normalised is None:
+                failures.append((file_path.name, "no usable 't_sec' or 'timestamp' column"))
+                continue
+
+            all_data.append(normalised)
+
+        if failures:
+            total = len(all_data) + len(failures)
+            print(f"Skipped {len(failures)} of {total} file(s) in {self.data_dir}:")
+            for name, reason in failures:
+                print(f"  - {name}: {reason}")
+
         if not all_data:
             return pd.DataFrame()
-        
+
         combined_df = pd.concat(all_data, ignore_index=True)
-        combined_df = combined_df.sort_values('timestamp')
-        return combined_df
+        return combined_df.sort_values('timestamp').reset_index(drop=True)
+
+    @staticmethod
+    def _normalise_time_columns(df: pd.DataFrame, session_date: pd.Timestamp) -> Optional[pd.DataFrame]:
+        """Give df both 't_sec' (seconds from session start) and 'timestamp'.
+
+        Returns None when the frame carries no recoverable time column.
+        """
+        if 'timestamp' in df.columns:
+            numeric = pd.to_numeric(df['timestamp'], errors='coerce')
+            if numeric.notna().all():
+                # Legacy writer stored elapsed seconds under the name
+                # 'timestamp' (posture_live_full.py). Recover it as t_sec and
+                # rebuild an absolute timestamp from the filename stamp.
+                df['t_sec'] = numeric
+                df['timestamp'] = session_date + pd.to_timedelta(numeric, unit='s')
+                return df
+
+            parsed = pd.to_datetime(df['timestamp'], errors='coerce', format='mixed')
+            if parsed.notna().any():
+                df['timestamp'] = parsed
+                if 't_sec' in df.columns:
+                    df['t_sec'] = pd.to_numeric(df['t_sec'], errors='coerce')
+                else:
+                    df['t_sec'] = (parsed - session_date).dt.total_seconds()
+                return df
+
+        if 't_sec' in df.columns:
+            t_sec = pd.to_numeric(df['t_sec'], errors='coerce')
+            df['t_sec'] = t_sec
+            df['timestamp'] = session_date + pd.to_timedelta(t_sec, unit='s')
+            return df
+
+        return None
     
     def analyze_session(self, session_file: str) -> Dict:
         """Analyze a single session and return comprehensive statistics."""
@@ -94,6 +185,14 @@ class PostureAnalytics:
             angle_stats = {}
             for col in angle_columns:
                 if col in df.columns:
+                    # The canonical schema writes every column in every file,
+                    # so a monitor that does not compute an angle leaves it
+                    # entirely empty. Summarising such a column yields NaN and
+                    # a "Mean of empty slice" warning, so skip it outright.
+                    numeric = pd.to_numeric(df[col], errors='coerce')
+                    if numeric.notna().sum() == 0:
+                        continue
+                    df[col] = numeric
                     angle_stats[col] = {
                         "mean": df[col].mean(),
                         "std": df[col].std(),

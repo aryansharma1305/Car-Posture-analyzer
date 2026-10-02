@@ -15,15 +15,23 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 
 from driver_comfort_analyzer import DriverComfortAnalyzer
+from driver_model import DRIVING, get_reference
+from session_schema import SessionMetadata
 
 class DriverComfortReporter:
     """
     Generates comprehensive driver comfort reports for Mahindra's seat ergonomics research.
     """
     
+    # Sessions recorded before session_schema v2 carry no posture_reference in
+    # their sidecar. They are all in-car recordings, so DRIVING is the right
+    # fallback - but it is a fallback, and it is reported as one in
+    # session_info['posture_reference_source'].
+    DEFAULT_REFERENCE = DRIVING
+
     def __init__(self, data_dir: str = "posture_logs"):
         self.data_dir = Path(data_dir)
-        self.analyzer = DriverComfortAnalyzer()
+        self.analyzer = DriverComfortAnalyzer(self.DEFAULT_REFERENCE)
         
         # Set up plotting style
         plt.style.use('seaborn-v0_8')
@@ -38,14 +46,56 @@ class DriverComfortReporter:
         
         # Load CSV data
         df = pd.read_csv(file_path)
-        
-        # Extract session info from filename
+
+        # Prefer the session sidecar over guesses. driver_id and seat_type were
+        # previously hardcoded to 'test_driver'/'test_seat', which made every
+        # report un-attributable and left analyze_seat_comparison unusable.
         session_id = session_file.replace('driver_comfort_', '').replace('.csv', '')
+        meta = SessionMetadata.load(file_path)
+
+        # 'duration' must be elapsed seconds. The legacy writer stored those in
+        # a column called 'timestamp'; the canonical schema puts them in
+        # 't_sec' and keeps 'timestamp' for the wall clock, so reading
+        # 'timestamp' here would return a datetime, not a duration.
+        if df.empty:
+            duration = 0
+        elif 't_sec' in df.columns:
+            duration = pd.to_numeric(df['t_sec'], errors='coerce').max()
+        else:
+            duration = pd.to_numeric(df.get('timestamp'), errors='coerce').max()
+
+        # What the WRITER recorded about this session's coverage, read straight
+        # from the schema-3 columns. Reported alongside the reporter's own
+        # re-scoring so a disagreement between them is visible rather than
+        # silently resolved in favour of one.
+        logged_coverage = {}
+        if 'observation' in df.columns and not df.empty:
+            observation = df['observation'].astype(str).str.strip().str.lower()
+            recorded = observation.isin({'true', 'false'})
+            if recorded.any():
+                logged_coverage['rows'] = int(recorded.sum())
+                logged_coverage['observations'] = int((observation == 'true').sum())
+        if 'measured_fraction' in df.columns and not df.empty:
+            fractions = pd.to_numeric(df['measured_fraction'], errors='coerce').dropna()
+            if not fractions.empty:
+                logged_coverage['mean_measured_fraction'] = round(
+                    float(fractions.mean()), 3)
+        if 'frame_confidence' in df.columns and not df.empty:
+            confidence = pd.to_numeric(df['frame_confidence'], errors='coerce').dropna()
+            if not confidence.empty:
+                logged_coverage['mean_frame_confidence'] = round(
+                    float(confidence.mean()), 3)
+
+        named_reference = meta.posture_reference if meta else None
         session_info = {
-            'session_id': session_id,
-            'driver_id': 'test_driver',  # Can be customized
-            'seat_type': 'test_seat',    # Can be customized
-            'duration': df['timestamp'].max() if not df.empty else 0
+            'session_id': meta.session_id if meta else session_id,
+            'driver_id': (meta.driver_id if meta and meta.driver_id else 'unknown'),
+            'seat_type': (meta.seat_id if meta and meta.seat_id else 'unknown'),
+            'duration': duration,
+            'metadata_source': 'sidecar' if meta else 'none',
+            'posture_reference': named_reference or self.DEFAULT_REFERENCE.name,
+            'posture_reference_source': 'sidecar' if named_reference else 'default',
+            'logged_coverage': logged_coverage or None,
         }
         
         return df, session_info
@@ -60,7 +110,18 @@ class DriverComfortReporter:
         if df.empty:
             return {"error": "No data found in session file"}
         
-        # Convert to format expected by analyzer
+        # Score against the reference this session was actually recorded under.
+        analyzer = DriverComfortAnalyzer(
+            get_reference(session_info['posture_reference']))
+
+        # Convert to format expected by analyzer. The SIGNED columns are passed
+        # through whenever they were recorded: they are what distinguishes a
+        # supported recline from a hunch, and dropping them forced the
+        # analyzer's magnitude backfill to assume every lean was forward.
+        signed_available = {
+            'trunk_signed': 'trunk_signed' in df.columns,
+            'neck_signed': 'neck_signed' in df.columns,
+        }
         session_data = []
         for _, row in df.iterrows():
             angles = {
@@ -71,8 +132,14 @@ class DriverComfortReporter:
                 'left_hip_angle': row['hip_L'],
                 'right_hip_angle': row['hip_R']
             }
+            for key, present in signed_available.items():
+                if present and pd.notna(row[key]):
+                    angles[key] = float(row[key])
             session_data.append({'angles': angles})
-        
+
+        session_info['signed_lean_recorded'] = bool(
+            session_data and 'trunk_signed' in session_data[0]['angles'])
+
         # Generate comfort report
         report = self.analyzer.generate_comfort_report(session_data, session_info)
         
@@ -146,12 +213,30 @@ class DriverComfortReporter:
                 else:
                     analysis['comfort_trend'] = "stable"
         
-        # Time-based comfort distribution
-        if 'comfort_score' in df.columns and 'timestamp' in df.columns:
-            # Group by time intervals
-            df['time_group'] = pd.cut(df['timestamp'], bins=10, labels=False)
-            time_comfort = df.groupby('time_group')['comfort_score'].mean()
-            analysis['time_based_comfort'] = time_comfort.to_dict()
+        # Time-based comfort distribution.
+        # Bin on t_sec, the elapsed-seconds column. This used to bin on
+        # 'timestamp', which under the canonical schema is an ISO wall-clock
+        # STRING, so pd.cut raised DTypePromotionError on every canonical or
+        # migrated session - the same elapsed-vs-clock confusion already fixed
+        # in load_session_data. Falling back to 'timestamp' keeps pre-schema
+        # files working, where that column did hold elapsed seconds.
+        time_column = 't_sec' if 't_sec' in df.columns else 'timestamp'
+        if 'comfort_score' in df.columns and time_column in df.columns:
+            elapsed = pd.to_numeric(df[time_column], errors='coerce')
+            comfort = pd.to_numeric(df['comfort_score'], errors='coerce')
+            usable = elapsed.notna() & comfort.notna()
+            # pd.cut needs at least two distinct values to form bins.
+            if usable.sum() >= 2 and elapsed[usable].nunique() >= 2:
+                groups = pd.cut(elapsed[usable], bins=10, labels=False)
+                time_comfort = comfort[usable].groupby(groups).mean()
+                analysis['time_based_comfort'] = {
+                    int(k): float(v) for k, v in time_comfort.items()
+                }
+            else:
+                analysis['time_based_comfort'] = {}
+                analysis['time_based_comfort_note'] = (
+                    f"not enough usable samples in {time_column}/comfort_score"
+                )
         
         return analysis
     
@@ -164,20 +249,43 @@ class DriverComfortReporter:
             'comfort_optimization': []
         }
         
-        # Analyze trunk angle patterns
-        if 'trunk_deg' in df.columns:
-            trunk_mean = df['trunk_deg'].mean()
-            trunk_std = df['trunk_deg'].std()
-            
-            if trunk_mean > 10:
+        # Analyze trunk angle patterns.
+        # Direction needs the SIGNED column. Reading these bounds off trunk_deg
+        # made the backward-lean branch dead code - trunk_deg is a 0..90
+        # MAGNITUDE and can never be below -5 - so an over-reclined seat was
+        # reported as a forward lean.
+        trunk_column = 'trunk_signed' if (
+            'trunk_signed' in df.columns and df['trunk_signed'].notna().any()
+        ) else 'trunk_deg'
+        if trunk_column in df.columns:
+            trunk_series = pd.to_numeric(df[trunk_column], errors='coerce').dropna()
+        else:
+            trunk_series = pd.Series(dtype=float)
+        if not trunk_series.empty:
+            trunk_mean = trunk_series.mean()
+            trunk_std = trunk_series.std()
+            ideal = self.DEFAULT_REFERENCE.ideal.get('trunk_signed')
+
+            if trunk_column == 'trunk_signed' and ideal is not None:
+                if trunk_mean > ideal.max:
+                    insights['seat_adjustment_recommendations'].append(
+                        "Consider increasing seat backrest angle to reduce forward lean"
+                    )
+                elif trunk_mean < ideal.min:
+                    insights['seat_adjustment_recommendations'].append(
+                        "Consider decreasing seat backrest angle to reduce backward lean"
+                    )
+            elif trunk_mean > 10:
+                # Magnitude only: the direction is unrecoverable, so say so
+                # instead of asserting one.
                 insights['seat_adjustment_recommendations'].append(
-                    "Consider increasing seat backrest angle to reduce forward lean"
+                    "Mean trunk angle is "
+                    f"{trunk_mean:.1f} deg off vertical; lean DIRECTION was not "
+                    "recorded for this session, so the backrest change cannot "
+                    "be signed. Re-record with --camera-position left-side or "
+                    "right-side."
                 )
-            elif trunk_mean < -5:
-                insights['seat_adjustment_recommendations'].append(
-                    "Consider decreasing seat backrest angle to reduce backward lean"
-                )
-            
+
             if trunk_std > 8:
                 insights['design_considerations'].append(
                     "High trunk angle variability suggests need for better lumbar support"
@@ -327,7 +435,15 @@ class DriverComfortReporter:
         report_data = self.generate_comprehensive_report(session_file, output_dir)
         
         if 'error' in report_data:
-            return f"Error generating report: {report_data['error']}"
+            coverage = report_data.get('measurement_coverage', {})
+            excluded = report_data.get('excluded_data_points', 0)
+            return (
+                f"No report generated for {session_file}: {report_data['error']}. "
+                f"{excluded} frame(s) were excluded. {coverage.get('note', '')} "
+                "A session whose angles were recorded without lean DIRECTION "
+                "cannot be scored against the driving model - see "
+                "driver_model.DRIVING.required_angles."
+            ).strip()
         
         # Create visualizations
         viz_files = self.create_visualizations(session_file, output_dir)
@@ -353,7 +469,15 @@ class DriverComfortReporter:
             f.write(f"- **Overall Comfort:** {report_data['summary']['average_comfort']:.1f}/100\n")
             f.write(f"- **Comfort Category:** {report_data['summary']['final_comfort_category']}\n")
             f.write(f"- **Comfort Trend:** {report_data['comfort_trend']['description']}\n")
-            f.write(f"- **Data Points:** {report_data['data_points']}\n\n")
+            f.write(f"- **Data Points:** {report_data['data_points']}\n")
+            coverage = report_data.get('measurement_coverage', {})
+            f.write(f"- **Excluded Frames:** {report_data.get('excluded_data_points', 0)} "
+                    f"(usable fraction {coverage.get('usable_fraction', 'n/a')})\n")
+            missing = coverage.get('angles_most_often_missing') or {}
+            if missing:
+                worst = ", ".join(f"{a} x{n}" for a, n in list(missing.items())[:4])
+                f.write(f"- **Most Often Not Measured:** {worst}\n")
+            f.write("\n")
             
             f.write("## Detailed Analysis\n\n")
             
