@@ -1,0 +1,86 @@
+# Runs the test suite on every push and pull request.
+#
+# The suite needs no camera, which is the reason it can run here at all: the
+# angle maths is validated against synthetic skeletons with an exactly known
+# angle (see validation_geometry.py), so CI can assert the pixel-to-angle path
+# is correct without any hardware.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:   # so it can be run by hand from the Actions tab
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # 3.10 is the version this project is developed against. MediaPipe is the
+    # constraint on widening it - add versions here only once they have wheels.
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # opencv-python links against libGL, which a headless runner does not ship.
+      # The package names differ between Ubuntu 22.04 and 24.04, hence the
+      # fallback rather than pinning the runner to one release.
+      - name: Install system libraries for OpenCV
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libglib2.0-0t64 \
+            || sudo apt-get install -y -qq libgl1 libglib2.0-0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # One test skips when the pose stack is unavailable, so that contributors
+      # without MediaPipe can still run the rest. Asserting the imports here
+      # means that skip can never happen silently in CI and hide a broken
+      # install.
+      - name: Verify the pose stack is importable
+        run: python -c "import cv2, mediapipe; print(cv2.__version__, mediapipe.__version__)"
+
+      # Catches breakage in the modules that have no tests of their own -
+      # demo.py, posture_live.py, posture_analytics.py and the two monitors.
+      - name: Import every module
+        run: |
+          python - <<'PY'
+          import importlib, pathlib, sys
+          failures = []
+          for path in sorted(pathlib.Path(".").glob("*.py")):
+              try:
+                  importlib.import_module(path.stem)
+              except Exception as exc:
+                  failures.append(f"{path.name}: {type(exc).__name__}: {exc}")
+          for failure in failures:
+              print(failure)
+          print(f"checked {len(list(pathlib.Path('.').glob('*.py')))} module(s), "
+                f"{len(failures)} failure(s)")
+          sys.exit(1 if failures else 0)
+          PY
+
+      - name: Run tests
+        run: python -m pytest tests -q
+
+      # The angle-measurement control. Fast, needs no camera, and must be exact:
+      # it is what makes a real validation trial's error attributable to the
+      # camera rather than to this project's arithmetic.
+      - name: Synthetic angle control
+        run: python validate_angles.py synth
+
+      # Smoke test against the log corpus committed to the repo. Dry run, so it
+      # writes nothing.
+      - name: Legacy log migration (dry run)
+        run: python migrate_logs.py

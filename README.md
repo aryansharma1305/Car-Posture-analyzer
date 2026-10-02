@@ -1,5 +1,7 @@
 # Car Posture Analyzer
 
+[![tests](https://github.com/aryansharma1305/Car-Posture-analyzer/actions/workflows/tests.yml/badge.svg)](https://github.com/aryansharma1305/Car-Posture-analyzer/actions/workflows/tests.yml)
+
 Camera-based driver posture measurement for automotive seat ergonomics research.
 
 A webcam watches a seated driver, MediaPipe Pose gives the joint landmarks, and this
@@ -110,8 +112,14 @@ guesses into their results.
 
 ## Install
 
-Developed and tested on Python 3.10. MediaPipe is the constraint on newer versions —
-check it has a wheel for your interpreter before upgrading.
+Developed and tested on Python 3.10.
+
+`requirements.txt` carries upper bounds that matter. **`mediapipe<0.10.22`** — the
+`mp.solutions` API `pose_core` is built on was removed inside the 0.10.x line; 0.10.21
+works, 0.10.35 does not. **`opencv-contrib-python<5.0` as well as `opencv-python<5.0`** —
+MediaPipe pulls in the contrib distribution, and whichever cv2 is installed last wins
+`import cv2`, so bounding one without the other achieves nothing. Lifting the MediaPipe
+bound means porting to its Tasks API — a project, not a version bump.
 
 ```bash
 git clone https://github.com/aryansharma1305/Car-Posture-analyzer.git

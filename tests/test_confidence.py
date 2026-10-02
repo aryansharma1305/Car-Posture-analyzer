@@ -166,9 +166,17 @@ def test_every_angle_the_pipeline_emits_declares_its_landmarks():
 
 
 def test_declared_landmarks_all_exist_in_the_pose_vocabulary():
-    from pose_core import LANDMARK_INDEX
+    """The only test that needs the pose stack installed.
+
+    Skipped rather than failed when MediaPipe is absent, so a contributor on an
+    unsupported interpreter can still run the other 276. CI asserts the imports
+    in a separate step, so this skip cannot happen there and hide a broken
+    install.
+    """
+    pose_core = pytest.importorskip(
+        "pose_core", reason="needs mediapipe and opencv")
     needed = set().union(*ANGLE_LANDMARKS.values())
-    assert needed <= set(LANDMARK_INDEX)
+    assert needed <= set(pose_core.LANDMARK_INDEX)
 
 
 def test_no_visibility_information_masks_nothing():
