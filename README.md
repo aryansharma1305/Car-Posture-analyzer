@@ -1,5 +1,7 @@
 # Car Posture Analyzer
 
+[![tests](https://github.com/aryansharma1305/Car-Posture-analyzer/actions/workflows/tests.yml/badge.svg)](https://github.com/aryansharma1305/Car-Posture-analyzer/actions/workflows/tests.yml)
+
 Camera-based driver posture measurement for automotive seat ergonomics research.
 
 A webcam watches a seated driver, MediaPipe Pose gives the joint landmarks, and this
