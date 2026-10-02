@@ -3,16 +3,23 @@ import csv
 import time
 from pathlib import Path
 from pose_core import PoseExtractor
-from posture_angles import compute_angles
+from posture_angles import compute_angles, resync_magnitude_views
 from smoothing import AngleSmoother
+from datetime import datetime
+from session_schema import SessionMetadata, SessionWriter
 from posture_rules import classify_posture, PostureConfig
 
 GREEN=(0,255,0); RED=(0,0,255); YEL=(0,255,255); WHT=(255,255,255)
 
+
+# Seconds between logged CSV rows.
+LOG_INTERVAL_S = 1.0
+
 def draw_text(img, text, x, y, color=WHT, scale=0.7, thick=2):
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 
-def main():
+def main(metadata: "SessionMetadata | None" = None):
+    """Run the basic posture monitor. See posture_live_full.main for metadata."""
     cap = cv2.VideoCapture(0)  # change to 1/2 if you have multiple cameras
     extractor = PoseExtractor(min_detection_confidence=0.6, min_tracking_confidence=0.6)
     smoother = AngleSmoother(alpha=0.25)
@@ -29,13 +36,20 @@ def main():
     angles_log_path = out_dir / f"angles_{session_start_ts}.csv"
     summary_path     = out_dir / f"summary_{session_start_ts}.csv"
 
-    with open(angles_log_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["t_sec","label","neck_from_vertical","trunk_from_vertical",
-                    "left_hip_angle","right_hip_angle","left_knee_angle","right_knee_angle",
-                    "left_shoulder_elev","right_shoulder_elev"])
+    if metadata is None:
+        metadata = SessionMetadata(
+            session_id=angles_log_path.stem,
+            started_at=datetime.now().isoformat(),
+            app="posture_live.py",
+        )
+    else:
+        metadata.session_id = angles_log_path.stem
+        metadata.started_at = datetime.now().isoformat()
+        metadata.app = "posture_live.py"
+    writer = SessionWriter(angles_log_path, metadata=metadata)
 
     t0 = time.monotonic()
+    last_log = t0 - LOG_INTERVAL_S   # force a row on the first processed frame
     fps_avg = None
 
     while True:
@@ -48,7 +62,8 @@ def main():
             extractor.draw(frame, results)
             try:
                 raw_angles = compute_angles(pts)
-                angles = smoother(raw_angles)
+                # Smooth the signed series, then rederive the magnitudes.
+                angles = resync_magnitude_views(smoother(raw_angles))
 
                 label, tags = classify_posture(angles, cfg)
 
@@ -63,15 +78,15 @@ def main():
                     current_label = label
                 label_durations[current_label] = label_durations.get(current_label, 0.0) + dt
 
-                # log roughly once per second
-                if int(now - t0) != int(now - t0 - dt):
-                    with open(angles_log_path, "a", newline="", encoding="utf-8") as f:
-                        w = csv.writer(f)
-                        w.writerow([round(now - t0,2), label] + [round(angles[k],2) for k in [
-                            "neck_from_vertical","trunk_from_vertical",
-                            "left_hip_angle","right_hip_angle",
-                            "left_knee_angle","right_knee_angle",
-                            "left_shoulder_elev","right_shoulder_elev"]])
+                # Log at LOG_INTERVAL_S cadence, advancing by whole intervals
+                # so the cadence holds instead of drifting by one frame time.
+                if now - last_log >= LOG_INTERVAL_S:
+                    last_log += LOG_INTERVAL_S * int((now - last_log) // LOG_INTERVAL_S)
+                    writer.write(
+                        t_sec=now - t0,
+                        angles=angles,
+                        posture_label=label,
+                    )
 
                 # UI
                 color = GREEN if label == "Neutral" else (YEL if "mild" in tags else RED)

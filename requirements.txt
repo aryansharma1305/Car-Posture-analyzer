@@ -16,7 +16,7 @@ pathlib2>=2.3.7; python_version < "3.4"
 # sounddevice>=0.4.6  # For audio alerts
 # pygame>=2.5.0      # For enhanced UI elements
 
-# Development dependencies (optional)
-# pytest>=7.0.0      # For testing
+# Development dependencies
+pytest>=7.0.0        # For tests/ (python3 -m pytest tests/)
 # black>=23.0.0      # For code formatting
 # flake8>=6.0.0      # For linting
