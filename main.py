@@ -11,7 +11,10 @@ from typing import Optional
 
 from posture_analytics import PostureAnalytics
 from config_manager import ConfigManager, create_default_config
-from posture_scoring import score_posture
+from session_schema import SessionMetadata
+from posture_scoring import PostureQualityScorer
+from driver_comfort_analyzer import DriverComfortAnalyzer
+from driver_model import DESK, REFERENCES, get_reference
 
 def main():
     """Main entry point for the posture analysis system."""
@@ -34,10 +37,13 @@ Examples:
 
   # Setup configuration
   python main.py config --create-default
-  python main.py config --apply-preset office
+  python main.py config --apply-preset driving
 
   # Quick posture scoring
   python main.py score --neck 15 --trunk 5 --hip 95 --knee 90
+
+  # Score the same driver against the automotive model (signed trunk/neck)
+  python main.py score --reference driving --trunk -20 --neck 5 --hip 105 --knee 115
         """
     )
     
@@ -47,6 +53,17 @@ Examples:
     monitor_parser = subparsers.add_parser('monitor', help='Start real-time posture monitoring')
     monitor_parser.add_argument('--enhanced', action='store_true', 
                                help='Use enhanced monitor with quality scoring')
+    monitor_parser.add_argument('--driver-id', type=str,
+                                help='Driver identifier recorded in the session sidecar')
+    monitor_parser.add_argument('--seat-id', type=str,
+                                help='Seat under test; required to group sessions '
+                                     'for seat comparison')
+    monitor_parser.add_argument('--vehicle', type=str,
+                                help='Vehicle identifier recorded in the session sidecar')
+    monitor_parser.add_argument('--camera-position', type=str,
+                                choices=['left-side', 'right-side', 'front', 'rear', 'other'],
+                                help='Where the camera sits relative to the driver. '
+                                     'Lean direction is only meaningful from the side.')
     monitor_parser.add_argument('--config', type=str, default='user',
                                help='Configuration profile to use')
     
@@ -73,7 +90,8 @@ Examples:
     config_parser.add_argument('--list-profiles', action='store_true', 
                               help='List available configuration profiles')
     config_parser.add_argument('--apply-preset', type=str, 
-                              help='Apply ergonomic preset (office, gaming, student)')
+                              help='Apply ergonomic preset '
+                                   '(driving, office, gaming, student)')
     config_parser.add_argument('--reset', action='store_true', 
                               help='Reset user configuration to default')
     
@@ -84,6 +102,14 @@ Examples:
     score_parser.add_argument('--hip', type=float, help='Hip angle')
     score_parser.add_argument('--knee', type=float, help='Knee angle')
     score_parser.add_argument('--shoulder', type=float, help='Shoulder elevation angle')
+    score_parser.add_argument('--reference', type=str, default=DESK.name,
+                              choices=sorted(REFERENCES),
+                              help='Posture model to score against. "desk" is '
+                                   'upright office seating; "driving" is '
+                                   'automotive seating, where 5-30 degrees of '
+                                   'recline is the ideal. With "driving", pass '
+                                   '--trunk/--neck as SIGNED angles '
+                                   '(negative = reclined).')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List available data files')
@@ -97,7 +123,9 @@ Examples:
     
     try:
         if args.command == 'monitor':
-            run_monitor(args.enhanced, args.config)
+            run_monitor(args.enhanced, args.config,
+                        metadata=build_session_metadata(args))
+
         elif args.command == 'analyze':
             run_analyze(args.session_file, args.output, args.verbose)
         elif args.command == 'report':
@@ -124,26 +152,67 @@ Examples:
             traceback.print_exc()
         sys.exit(1)
 
-def run_monitor(enhanced: bool, config_profile: str):
-    """Run real-time posture monitoring."""
+def build_session_metadata(args) -> 'SessionMetadata':
+    """Assemble session attribution from the CLI flags.
+
+    session_id/started_at/app are filled in by the monitor once it knows its
+    own log path, so they are placeholders here.
+    """
+    camera = getattr(args, 'camera_position', None)
+    # The sign of the lean angles is only anatomically meaningful from the
+    # side; left-side and right-side map image-right onto opposite body
+    # directions. Unknown for front/rear, so left as None rather than guessed.
+    forward_is_image_right = None
+    if camera == 'left-side':
+        forward_is_image_right = True
+    elif camera == 'right-side':
+        forward_is_image_right = False
+
+    meta = SessionMetadata(
+        session_id='', started_at='', app='',
+        driver_id=getattr(args, 'driver_id', None),
+        seat_id=getattr(args, 'seat_id', None),
+        vehicle=getattr(args, 'vehicle', None),
+        camera_position=camera,
+        forward_is_image_right=forward_is_image_right,
+    )
+    if not meta.seat_id:
+        print("Note: no --seat-id given. The session will be recorded but "
+              "cannot be grouped for seat comparison.")
+    return meta
+
+def run_monitor(enhanced: bool, config_profile: str, metadata=None):
+    """Run real-time posture monitoring.
+
+    config_profile selects a ConfigManager profile and it is now actually
+    passed to the monitor. It used to be accepted, printed in --help, and
+    dropped, so `--config office` ran the hardcoded defaults.
+    """
+    config = None
+    try:
+        config = ConfigManager().get_config(config_profile)
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        print("Falling back to built-in defaults.")
+
     if enhanced:
         print("Starting Enhanced Posture Monitor...")
         try:
             from posture_monitor_enhanced import main as run_enhanced_monitor
-            run_enhanced_monitor()
+            run_enhanced_monitor(metadata=metadata, config=config)
         except ImportError as e:
             print(f"Enhanced monitor not available: {e}")
             print("Falling back to basic monitor...")
-            run_basic_monitor()
+            run_basic_monitor(metadata=metadata, config=config)
     else:
         print("Starting Basic Posture Monitor...")
-        run_basic_monitor()
+        run_basic_monitor(metadata=metadata, config=config)
 
-def run_basic_monitor():
+def run_basic_monitor(metadata=None, config=None):
     """Run basic posture monitoring."""
     try:
-        from posture_live_full import main as run_basic_monitor
-        run_basic_monitor()
+        from posture_live_full import main as run_full_monitor
+        run_full_monitor(metadata=metadata, config=config)
     except ImportError as e:
         print(f"Basic monitor not available: {e}")
         print("Please ensure all required modules are installed")
@@ -157,14 +226,17 @@ def run_analyze(session_file: str, output_file: Optional[str], verbose: bool):
     try:
         # Generate report
         report = analytics.generate_session_report(session_file, output_file)
-        
+
+        # Always show the report - it is the whole point of the command.
+        # --verbose only adds the banner, and -o additionally writes a file.
         if verbose:
             print("\n" + "="*60)
             print("ANALYSIS COMPLETE")
             print("="*60)
-            print(report)
-        else:
-            print(f"Analysis complete. Report saved to: {output_file or 'console'}")
+        print(report)
+
+        if output_file:
+            print(f"\nReport also written to: {output_file}")
     
     except FileNotFoundError:
         print(f"Error: Session file not found: {session_file}")
@@ -213,7 +285,7 @@ def run_config(args):
             manager.apply_preset(args.apply_preset)
         except ValueError as e:
             print(f"Error: {e}")
-            print("Available presets: office, gaming, student")
+            print("Available presets: " + ", ".join(manager.get_ergonomic_presets()))
     
     elif args.reset:
         manager = ConfigManager()
@@ -223,18 +295,25 @@ def run_config(args):
         print("Configuration management options:")
         print("  --create-default    Create default configuration files")
         print("  --list-profiles     List available configuration profiles")
-        print("  --apply-preset      Apply ergonomic preset (office, gaming, student)")
+        print("  --apply-preset      Apply ergonomic preset (driving, office, gaming, student)")
         print("  --reset             Reset user configuration to default")
 
 def run_score(args):
-    """Quick posture quality scoring."""
-    # Build angles dictionary from arguments
+    """Quick posture quality scoring against a named posture reference."""
+    reference = get_reference(args.reference)
+
+    # Which view of the torso angle this reference reads. DRIVING reads the
+    # SIGNED angle, because recline against a backrest is not slouch; DESK
+    # reads the magnitude. Feeding a magnitude to the driving model is what
+    # made a properly reclined driver look like a hunched one.
+    trunk_key = reference.slouch_key
+    neck_key = reference.forward_head_key
+
     angles = {}
-    
     if args.neck is not None:
-        angles['neck_from_vertical'] = args.neck
+        angles[neck_key] = args.neck
     if args.trunk is not None:
-        angles['trunk_from_vertical'] = args.trunk
+        angles[trunk_key] = args.trunk
     if args.hip is not None:
         angles['left_hip_angle'] = args.hip
         angles['right_hip_angle'] = args.hip
@@ -244,51 +323,56 @@ def run_score(args):
     if args.shoulder is not None:
         angles['left_shoulder_elev'] = args.shoulder
         angles['right_shoulder_elev'] = args.shoulder
-    
-    # Fill in missing angles with default values
-    required_angles = [
-        'neck_from_vertical', 'trunk_from_vertical',
-        'left_hip_angle', 'right_hip_angle',
-        'left_knee_angle', 'right_knee_angle',
-        'left_shoulder_elev', 'right_shoulder_elev'
-    ]
-    
-    for angle in required_angles:
-        if angle not in angles:
-            if 'hip' in angle:
-                angles[angle] = 95.0  # Default seated hip angle
-            elif 'knee' in angle:
-                angles[angle] = 95.0  # Default seated knee angle
-            elif 'shoulder' in angle:
-                angles[angle] = 15.0  # Default shoulder elevation
-            else:
-                angles[angle] = 5.0   # Default neck/trunk angles
-    
-    # Calculate score
+
+    # Fill in anything the reference scores but the caller did not give, using
+    # the midpoint of its own ideal range so an unspecified angle is neutral
+    # rather than a hardcoded guess.
+    for angle, ideal in reference.ideal.items():
+        angles.setdefault(angle, (ideal.min + ideal.max) / 2.0)
+
+    # Each model has its own scorer: the desk model scores angle magnitudes by
+    # category, the driving model scores signed torso angles for comfort. They
+    # are not interchangeable, so route rather than fake one with the other.
     try:
-        score = score_posture(angles)
-        
+        if reference is DESK:
+            score = PostureQualityScorer(reference).score_posture(angles)
+            headline = f"Overall Score: {score.overall_score:.1f}/100"
+            risk = f"Risk Level: {score.risk_level}"
+            breakdown = {k.replace('_', ' ').title(): v
+                         for k, v in score.category_scores.items()}
+            recommendations = score.recommendations
+        else:
+            comfort = DriverComfortAnalyzer(reference).calculate_comfort_score(angles)
+            headline = f"Overall Comfort: {comfort.overall_comfort:.1f}/100"
+            risk = f"Category: {comfort.comfort_category}"
+            breakdown = {
+                "Posture Quality": comfort.posture_quality,
+                "Ergonomic Risk (lower is better)": comfort.ergonomic_risk,
+                "Fatigue Indicator (single sample)": comfort.fatigue_indicator,
+            }
+            recommendations = comfort.recommendations
+
         print("\n" + "="*50)
-        print("POSTURE QUALITY SCORE")
+        print(f"POSTURE SCORE ({reference.name})")
         print("="*50)
-        print(f"Overall Score: {score.overall_score:.1f}/100")
-        print(f"Risk Level: {score.risk_level}")
+        print(headline)
+        print(risk)
         print()
-        
-        print("Category Scores:")
-        for category, cat_score in score.category_scores.items():
-            print(f"  {category.replace('_', ' ').title()}: {cat_score:.1f}/100")
+
+        print("Breakdown:")
+        for label, value in breakdown.items():
+            print(f"  {label}: {value:.1f}/100")
         print()
-        
-        if score.recommendations:
+
+        if recommendations:
             print("Recommendations:")
-            for i, rec in enumerate(score.recommendations, 1):
+            for i, rec in enumerate(recommendations, 1):
                 print(f"  {i}. {rec}")
         else:
-            print("✅ Excellent posture! No recommendations needed.")
-        
+            print("Excellent posture! No recommendations needed.")
+
         print("="*50)
-    
+
     except Exception as e:
         print(f"Error calculating score: {e}")
 

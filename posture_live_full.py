@@ -1,19 +1,44 @@
-import cv2, time, csv, sys
+import cv2, time, csv, sys, traceback
+from datetime import datetime
 from pathlib import Path
+from session_schema import SessionMetadata, SessionWriter
 from pose_core import PoseExtractor
-from posture_angles import compute_angles
+from posture_angles import compute_angles, resync_magnitude_views
 from smoothing import AngleSmoother
 from posture_fullbody_rules import detect_body_state, classify_upper_body, BodyConfig
-from ergonomics_scores import compute_rula, compute_reba, feedback_lines, risk_buckets
+from ergonomics_scores import (
+    NO_DATA_CATEGORY,
+    compute_rula,
+    compute_reba,
+    feedback_lines,
+    risk_buckets,
+)
+from geometry_utils import format_angle
 from driver_comfort_analyzer import DriverComfortAnalyzer, score_driver_comfort
+from driver_model import DRIVING
 import json
 
 WHT=(255,255,255); RED=(0,0,255); GRN=(0,255,0); YEL=(0,255,255); BLK=(0,0,0); CYA=(255,255,0)
 
+# Seconds between logged CSV rows. Sampling the UI at frame rate but the log at
+# 1 Hz keeps session files small without losing posture trends.
+LOG_INTERVAL_S = 1.0
+
+# Minimum seconds between repeated error tracebacks on the console.
+ERROR_NOTICE_INTERVAL_S = 2.0
+
 def draw_text(img, txt, x, y, col=WHT, scale=0.8, thick=2):
     cv2.putText(img, txt, (x,y), cv2.FONT_HERSHEY_SIMPLEX, scale, col, thick, cv2.LINE_AA)
 
-def draw_header(img, rula, reba, fb_lines, duration_s, good_s, high_s, cam_idx, comfort_score):
+def _category_colour(category):
+    """Green/amber/red for a RULA or REBA category, cyan when it has no data."""
+    if category == NO_DATA_CATEGORY:
+        return CYA
+    return (0, 255, 0) if category == 1 else (0, 255, 255) if category == 2 else RED
+
+
+def draw_header(img, rula, reba, fb_lines, duration_s, good_s, high_s, nodata_s,
+                cam_idx, comfort_score):
     h, w = img.shape[:2]
     header_h = 120  # Increased height for comfort info
     cv2.rectangle(img, (0,0), (w, header_h), BLK, thickness=-1)
@@ -24,16 +49,24 @@ def draw_header(img, rula, reba, fb_lines, duration_s, good_s, high_s, cam_idx, 
     # Left column - Ergonomic Scores
     left_x = 10
     draw_text(img, "Ergonomic Scores", left_x, 45, CYA, 0.6, 2)
-    draw_text(img, f"RULA: {rula[1]} ({rula[0]})", left_x, 65, (0,255,0) if rula[0]==1 else (0,255,255) if rula[0]==2 else RED, 0.6, 2)
-    draw_text(img, f"REBA: {reba[1]} ({reba[0]})", left_x, 85, (0,255,0) if reba[0]==1 else (0,255,255) if reba[0]==2 else RED, 0.6, 2)
+    draw_text(img, f"RULA: {rula[1]} ({rula[0]})", left_x, 65, _category_colour(rula[0]), 0.6, 2)
+    draw_text(img, f"REBA: {reba[1]} ({reba[0]})", left_x, 85, _category_colour(reba[0]), 0.6, 2)
     
     # Middle column - Comfort Score
     mid_x = w//3 + 10
     draw_text(img, "Driver Comfort", mid_x, 45, CYA, 0.6, 2)
-    comfort_color = (0,255,0) if comfort_score.overall_comfort >= 85 else (0,255,255) if comfort_score.overall_comfort >= 70 else (0,165,255) if comfort_score.overall_comfort >= 50 else RED
-    draw_text(img, f"Score: {comfort_score.overall_comfort:.1f}", mid_x, 65, comfort_color, 0.6, 2)
+    # A frame the model could not observe is shown in cyan with its coverage,
+    # not in green with a number built from whatever happened to be visible.
+    if not comfort_score.is_observation:
+        comfort_color = CYA
+    else:
+        c = comfort_score.overall_comfort
+        comfort_color = ((0,255,0) if c >= 85 else (0,255,255) if c >= 70
+                         else (0,165,255) if c >= 50 else RED)
+    draw_text(img, f"Score: {format_angle(comfort_score.overall_comfort)}", mid_x, 65, comfort_color, 0.6, 2)
     draw_text(img, f"Category: {comfort_score.comfort_category}", mid_x, 85, comfort_color, 0.6, 2)
-    draw_text(img, f"Risk: {comfort_score.ergonomic_risk:.1f}", mid_x, 105, RED if comfort_score.ergonomic_risk > 50 else YEL, 0.6, 2)
+    draw_text(img, f"Measured: {comfort_score.measured_fraction*100:.0f}%", mid_x, 105,
+              comfort_color if comfort_score.is_observation else CYA, 0.6, 2)
     
     # Right column - Session Info
     right_x = 2*w//3 + 10
@@ -42,7 +75,7 @@ def draw_header(img, rula, reba, fb_lines, duration_s, good_s, high_s, cam_idx, 
     hh, mm = divmod(mm, 60)
     dur_txt = f"Duration: {hh:02d}:{mm:02d}:{ss:02d}"
     draw_text(img, dur_txt, right_x, 65, WHT, 0.6, 2)
-    draw_text(img, f"Good Time: {int(good_s)}s", right_x, 85, GRN, 0.6, 2)
+    draw_text(img, f"Good: {int(good_s)}s  No data: {int(nodata_s)}s", right_x, 85, GRN, 0.6, 2)
     draw_text(img, f"High Risk: {int(high_s)}s", right_x, 105, RED, 0.6, 2)
     
     # Camera info
@@ -63,15 +96,12 @@ def draw_comfort_recommendations(img, comfort_score, y_start=130):
     
     return y
 
-def get_vis(results):
-    lm = results.pose_landmarks.landmark
-    idx = {
-        "left_shoulder": 11, "right_shoulder": 12,
-        "left_hip": 23, "right_hip": 24,
-        "left_knee": 25, "right_knee": 26,
-        "left_ankle": 27, "right_ankle": 28,
-    }
-    return {k: lm[i].visibility for k, i in idx.items()}
+# get_vis() used to live here, hardcoding eight landmark indices - a second,
+# narrower copy of the map in pose_core. PoseExtractor.visibility(results)
+# covers every landmark the angles are built from, which is what
+# posture_angles.compute_angles needs in order to mask the ones MediaPipe only
+# guessed at.
+
 
 class CameraManager:
     """Advanced camera management with automatic detection and fallback"""
@@ -239,7 +269,27 @@ def show_camera_menu(camera_manager):
     print("   Press 'm' to show this menu again")
     print("="*60)
 
-def main():
+# This is the in-car monitor, so DRIVING is its reference unless a profile
+# names another one.
+DEFAULT_REFERENCE = DRIVING
+
+
+def main(metadata: "SessionMetadata | None" = None, config=None):
+    """Run the full driver monitor.
+
+    metadata: optional SessionMetadata describing who/which seat/which camera.
+        Without it the session is still recorded, but it cannot be attributed
+        to a seat under test and DriverComfortAnalyzer.analyze_seat_comparison
+        has nothing to group by.
+    config: optional config_manager.PostureConfig. Supplies the detection and
+        smoothing settings, and may name a different posture reference.
+    """
+    reference = (config.reference(DEFAULT_REFERENCE) if config is not None
+                 else DEFAULT_REFERENCE)
+    detection_conf = getattr(config, "detection_confidence", None) or 0.6
+    tracking_conf = getattr(config, "tracking_confidence", None) or 0.6
+    smoothing_alpha = getattr(config, "smoothing_alpha", None) or 0.25
+    log_interval = getattr(config, "logging_interval_seconds", None) or LOG_INTERVAL_S
     print("🚗 Mahindra Driver Comfort Analyzer - Advanced Camera System")
     print("="*70)
     
@@ -267,7 +317,8 @@ def main():
     # Initialize other components
     try:
         print("🔧 Initializing PoseExtractor...")
-        pe = PoseExtractor(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+        pe = PoseExtractor(min_detection_confidence=detection_conf,
+                           min_tracking_confidence=tracking_conf)
         print("✅ PoseExtractor initialized successfully")
     except Exception as e:
         print(f"❌ Failed to initialize PoseExtractor: {e}")
@@ -276,7 +327,7 @@ def main():
     
     try:
         print("🔧 Initializing AngleSmoother...")
-        sm = AngleSmoother(alpha=0.25)
+        sm = AngleSmoother(alpha=smoothing_alpha)
         print("✅ AngleSmoother initialized successfully")
     except Exception as e:
         print(f"❌ Failed to initialize AngleSmoother: {e}")
@@ -292,31 +343,54 @@ def main():
     
     try:
         print("🔧 Initializing DriverComfortAnalyzer...")
-        comfort_analyzer = DriverComfortAnalyzer()
+        comfort_analyzer = DriverComfortAnalyzer(reference)
         print("✅ DriverComfortAnalyzer initialized successfully")
     except Exception as e:
         print(f"❌ Failed to initialize DriverComfortAnalyzer: {e}")
         return
 
-    # Setup logging
+    # Setup logging through the canonical schema (session_schema.py), which
+    # also writes the metadata sidecar.
     out_dir = Path("posture_logs"); out_dir.mkdir(exist_ok=True)
     session = time.strftime("%Y%m%d_%H%M%S")
     log_path = out_dir / f"driver_comfort_{session}.csv"
-    
-    # Enhanced logging with comfort scores
-    with open(log_path, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow([
-            "timestamp","body_state","upper_body","trunk_deg","neck_deg",
-            "knee_L","knee_R","hip_L","hip_R","comfort_score","comfort_category",
-            "posture_quality","ergonomic_risk","fatigue_indicator"
-        ])
+
+    if metadata is None:
+        metadata = SessionMetadata(
+            session_id=log_path.stem,
+            started_at=datetime.now().isoformat(),
+            app="posture_live_full.py",
+        )
+    else:
+        metadata.session_id = log_path.stem
+        metadata.started_at = datetime.now().isoformat()
+        metadata.app = "posture_live_full.py"
+    # Recorded in the sidecar because the same angles label differently under
+    # each reference, so a reader cannot interpret the labels without it.
+    metadata.posture_reference = reference.name
+    writer = SessionWriter(log_path, metadata=metadata)
+
+    # Which image direction is the driver's anatomical FORWARD. Declared by
+    # --camera-position; None for a front/rear camera, where the lean sign
+    # carries little signal and the default is as good as any guess.
+    forward_is_image_right = metadata.forward_is_image_right
+    if forward_is_image_right is None:
+        forward_is_image_right = True
+        if metadata.camera_position not in (None, "left-side"):
+            print("⚠️  Camera position "
+                  f"{metadata.camera_position!r} does not determine which way "
+                  "the driver faces in frame; lean SIGN may be inverted. "
+                  "Use --camera-position left-side or right-side.")
 
     # Session tracking
     t0 = time.monotonic()
     last_tick = t0
     good_time = 0.0
     high_time = 0.0
+    nodata_time = 0.0
     fps_avg = None
+    last_log = t0 - log_interval   # force a row on the first processed frame
+    last_error_notice = 0.0
     
     # Store posture history for fatigue analysis
     posture_history = []
@@ -355,13 +429,10 @@ def main():
 
         # Process frame
         try:
-            print(f"🔍 Processing frame: {frame.shape if frame is not None else 'None'}")
             pose_result = pe.process_bgr(frame)
-            print(f"📊 Pose result: {type(pose_result)} - {pose_result}")
             
             if pose_result is None:
                 # No pose detected or error occurred
-                print("⚠️ No pose detected - frame may be empty or pose detection failed")
                 draw_text(frame, "No person detected", 10, 150, RED)
                 draw_text(frame, "Position yourself in front of the camera", 10, 180, YEL)
                 draw_text(frame, "Make sure you are visible in the frame", 10, 210, YEL)
@@ -394,12 +465,15 @@ def main():
             
             # Unpack pose results
             results, pts, (img_h, img_w) = pose_result
-            print(f"✅ Pose detected: {img_w}x{img_h}")
             
             # Process pose data
             pe.draw(frame, results)
-            vis = get_vis(results)
-            angles = sm(compute_angles(pts))
+            vis = pe.visibility(results)
+            # Smooth the signed series, then rederive the magnitudes.
+            # visibility=vis makes compute_angles return NaN for any angle
+            # built on a landmark MediaPipe did not actually see.
+            angles = resync_magnitude_views(
+                sm(compute_angles(pts, forward_is_image_right, vis)))
             
             # Store posture history for fatigue analysis
             posture_history.append(angles.copy())
@@ -407,10 +481,10 @@ def main():
                 posture_history.pop(0)
             
             body_state, extras = detect_body_state(pts, angles, vis, (img_h, img_w), cfg)
-            upper = classify_upper_body(angles)
+            upper = classify_upper_body(angles, reference)
             rula = compute_rula(angles)
             reba = compute_reba(angles)
-            fb = feedback_lines(angles)
+            fb = feedback_lines(angles, reference)
             
             # Calculate driver comfort score
             session_duration = time.monotonic() - t0
@@ -426,10 +500,14 @@ def main():
                 good_time += dt
             elif bucket == "high":
                 high_time += dt
+            elif bucket == "unknown":
+                # Tracked rather than dropped: a session that spent most of its
+                # time unassessable is not a session with no risk.
+                nodata_time += dt
             
             # Draw enhanced header with comfort info
-            draw_header(frame, rula, reba, fb, now - t0, good_time, high_time, 
-                       camera_manager.current_camera, comfort_score)
+            draw_header(frame, rula, reba, fb, now - t0, good_time, high_time,
+                        nodata_time, camera_manager.current_camera, comfort_score)
             
             # Draw comfort recommendations
             y_pos = draw_comfort_recommendations(frame, comfort_score)
@@ -439,31 +517,40 @@ def main():
             col = GRN if body_state in ("Standing","Sitting") else (YEL if body_state=="Unknown" else RED)
             draw_text(frame, f"Body: {body_state}", 10, y, col, 0.8, 2); y+=24
             draw_text(frame, f"Upper: {upper}" + (f" / {extras['lean_side']}" if extras['lean_side'] else ""), 10, y, WHT); y+=22
-            draw_text(frame, f"trunk:{angles['trunk_from_vertical']:.1f}° neck:{angles['neck_from_vertical']:.1f}°", 10, y); y+=22
-            draw_text(frame, f"knee L/R:{angles['left_knee_angle']:.1f}/{angles['right_knee_angle']:.1f}°", 10, y); y+=22
-            draw_text(frame, f"hip L/R:{angles['left_hip_angle']:.1f}/{angles['right_hip_angle']:.1f}°", 10, y); y+=22
+            # format_angle prints "--" for an unmeasured angle. Formatting with
+            # :.1f printed the text "nan" at the driver.
+            fa = format_angle
+            draw_text(frame, f"trunk:{fa(angles['trunk_from_vertical'])}° neck:{fa(angles['neck_from_vertical'])}°", 10, y); y+=22
+            draw_text(frame, f"knee L/R:{fa(angles['left_knee_angle'])}/{fa(angles['right_knee_angle'])}°", 10, y); y+=22
+            draw_text(frame, f"hip L/R:{fa(angles['left_hip_angle'])}/{fa(angles['right_hip_angle'])}°", 10, y); y+=22
             
             if not extras["lower_visible"]:
                 draw_text(frame, "Tip: Move camera back to include hips+knees.", 10, y+10, YEL, 0.6, 2)
             
-            # Log data with comfort scores
-            if int(now - t0) != int(now - t0 - (now - t1)):
-                with open(log_path, "a", newline="", encoding="utf-8") as f:
-                    csv.writer(f).writerow([
-                        round(now - t0,2), body_state, upper,
-                        round(angles["trunk_from_vertical"],1), round(angles["neck_from_vertical"],1),
-                        round(angles["left_knee_angle"],1), round(angles["right_knee_angle"],1),
-                        round(angles["left_hip_angle"],1), round(angles["right_hip_angle"],1),
-                        round(comfort_score.overall_comfort,1), comfort_score.comfort_category,
-                        round(comfort_score.posture_quality,1), round(comfort_score.ergonomic_risk,1),
-                        round(comfort_score.fatigue_indicator,1)
-                    ])
+            # Log data with comfort scores at LOG_INTERVAL_S cadence.
+            if now - last_log >= log_interval:
+                # Advance by whole intervals so the log keeps its 1 Hz phase.
+                # Resetting last_log to `now` instead would drift by one frame
+                # time per row and silently under-sample long sessions.
+                last_log += log_interval * int((now - last_log) // log_interval)
+                writer.write(
+                    t_sec=now - t0,
+                    angles=angles,
+                    body_state=body_state,
+                    upper_body=upper,
+                    extras=extras,
+                    comfort=comfort_score,
+                    visibility=vis,
+                    reference=reference,
+                )
         
         except Exception as e:
-            # Handle any errors during pose processing
-            print(f"⚠️ Error processing pose: {e}")
-            import traceback
-            traceback.print_exc()
+            # Handle any errors during pose processing. Rate-limited: a
+            # persistent failure would otherwise print a traceback per frame.
+            if time.monotonic() - last_error_notice >= ERROR_NOTICE_INTERVAL_S:
+                last_error_notice = time.monotonic()
+                print(f"⚠️ Error processing pose: {e}")
+                traceback.print_exc()
             draw_text(frame, "Error processing pose", 10, 150, RED)
             draw_text(frame, "Check camera connection", 10, 180, YEL)
             draw_text(frame, "Press 'c' to try different camera", 10, 210, YEL)
@@ -525,12 +612,21 @@ def main():
     
     # Generate final comfort report
     if posture_history:
+        # Attribution comes from the sidecar, never from placeholders. The
+        # 'test_driver'/'test_seat' literals that used to sit here made every
+        # report this monitor wrote un-attributable, which is the same defect
+        # already fixed in driver_comfort_reporter.
         session_info = {
             'duration': time.monotonic() - t0,
-            'driver_id': 'test_driver',
-            'seat_type': 'test_seat',
-            'session_id': session
+            'driver_id': metadata.driver_id or 'unknown',
+            'seat_type': metadata.seat_id or 'unknown',
+            'vehicle': metadata.vehicle,
+            'posture_reference': metadata.posture_reference,
+            'session_id': session,
         }
+        if not metadata.seat_id:
+            print("⚠️  No --seat-id for this session; the report cannot be "
+                  "grouped for seat comparison.")
         
         # Convert posture history to format expected by analyzer
         session_data = [{'angles': angles} for angles in posture_history]

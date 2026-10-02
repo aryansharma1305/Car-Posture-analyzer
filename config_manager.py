@@ -1,8 +1,19 @@
+"""Application settings for the posture tools.
+
+This module owns RUNTIME settings - camera, confidence, cadence, UI, alerts.
+It does not own ergonomics. The threshold fields below default from
+driver_model.DEFAULT_REFERENCE and exist so a profile can OVERRIDE the named
+reference, not so the numbers can be written down a seventh time; before this
+they were a dead copy that no monitor ever read.
+"""
 import json
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
+
+import driver_model
+import posture_rules
 
 @dataclass
 class PostureConfig:
@@ -52,14 +63,24 @@ class PostureConfig:
     alert_session_duration: bool = True
     sound_alerts: bool = False
     
-    # Ergonomic thresholds
-    neck_forward_threshold: float = 20.0
-    trunk_slouch_threshold: float = 18.0
-    shoulder_elevation_threshold: float = 35.0
-    hip_angle_target: float = 95.0
-    hip_angle_tolerance: float = 25.0
-    knee_angle_target: float = 95.0
-    knee_angle_tolerance: float = 25.0
+    # Which driver_model.PostureReference this profile scores against:
+    # "driving" for in-car seating, "desk" for upright office seating.
+    # None means "whatever the monitor's own default is", which is how a
+    # general-purpose profile avoids silently switching the in-car monitor to
+    # the desk model.
+    posture_reference: Optional[str] = None
+
+    # Ergonomic thresholds. None means "take the reference's value" - the
+    # reason these are Optional rather than numbers is that a default number
+    # here would be a copy of the model, and copies drift. Set one only to
+    # deviate from the reference deliberately.
+    neck_forward_threshold: Optional[float] = None
+    trunk_slouch_threshold: Optional[float] = None
+    shoulder_elevation_threshold: Optional[float] = None
+    hip_angle_target: Optional[float] = None
+    hip_angle_tolerance: Optional[float] = None
+    knee_angle_target: Optional[float] = None
+    knee_angle_tolerance: Optional[float] = None
     
     # Analysis settings
     min_samples_for_analysis: int = 10
@@ -69,6 +90,44 @@ class PostureConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary."""
         return asdict(self)
+
+    def reference(
+        self,
+        default: Optional["driver_model.PostureReference"] = None,
+    ) -> "driver_model.PostureReference":
+        """The PostureReference this profile names.
+
+        `default` is the calling monitor's own reference, used when the profile
+        does not name one.
+        """
+        if self.posture_reference is None:
+            return default or driver_model.DEFAULT_REFERENCE
+        return driver_model.get_reference(self.posture_reference)
+
+    def to_posture_config(
+        self,
+        default_reference: Optional["driver_model.PostureReference"] = None,
+    ) -> "posture_rules.PostureConfig":
+        """The labelling thresholds, as posture_rules consumes them.
+
+        Starts from the reference - so the angle VIEW each threshold reads
+        (signed for driving, magnitude for desk) comes from the model - then
+        applies whichever of this profile's overrides are actually set.
+        """
+        cfg = posture_rules.PostureConfig.from_reference(
+            self.reference(default_reference))
+        for attr, override in (
+            ("trunk_slouch_deg", self.trunk_slouch_threshold),
+            ("neck_forward_deg", self.neck_forward_threshold),
+            ("shoulder_elev_deg", self.shoulder_elevation_threshold),
+            ("hip_angle_target", self.hip_angle_target),
+            ("hip_angle_tol", self.hip_angle_tolerance),
+            ("knee_angle_target", self.knee_angle_target),
+            ("knee_angle_tol", self.knee_angle_tolerance),
+        ):
+            if override is not None:
+                setattr(cfg, attr, override)
+        return cfg
     
     def save(self, filepath: str):
         """Save configuration to file."""
@@ -207,6 +266,13 @@ class ConfigManager:
         if config.max_session_duration_hours <= 0:
             issues.append("max_session_duration_hours must be positive")
         
+        if (config.posture_reference is not None
+                and config.posture_reference not in driver_model.REFERENCES):
+            issues.append(
+                "posture_reference must be one of "
+                f"{sorted(driver_model.REFERENCES)}, got {config.posture_reference!r}"
+            )
+
         # Check file paths
         log_dir = Path(config.log_directory)
         if not log_dir.parent.exists():
@@ -236,6 +302,15 @@ class ConfigManager:
         gaming_config.knee_angle_target = 100.0
         presets["gaming"] = gaming_config
         
+        # Driving preset. The only one that selects the automotive reference,
+        # and therefore the only one under which recline is not slouch.
+        driving_config = PostureConfig()
+        # Names the reference and overrides nothing: the automotive numbers
+        # belong to driver_model.DRIVING, not to this preset.
+        driving_config.posture_reference = driver_model.DRIVING.name
+        driving_config.break_interval_minutes = 120
+        presets["driving"] = driving_config
+
         # Student preset
         student_config = PostureConfig()
         student_config.break_interval_minutes = 25
