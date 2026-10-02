@@ -71,16 +71,23 @@ jobs:
           sys.exit(1 if failures else 0)
           PY
 
+      # Runs BEFORE pytest on purpose. posture_logs/migrated/ is gitignored
+      # derived data, so a fresh checkout does not have it, and
+      # test_real_migrated_corpus_is_uniform_and_in_range skips itself when it is
+      # absent. On the first green CI run that showed up as "276 passed, 1
+      # skipped" - the integration test over the 36 committed sessions was the
+      # one thing not being exercised. Building the corpus first makes it run.
+      - name: Migrate the legacy log corpus
+        run: python migrate_logs.py --apply
+
+      # -rs reports skip reasons. Without it a test that quietly stops running
+      # looks identical to one that passes, which is how the skip above went
+      # unnoticed in the first place.
       - name: Run tests
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q -rs
 
       # The angle-measurement control. Fast, needs no camera, and must be exact:
       # it is what makes a real validation trial's error attributable to the
       # camera rather than to this project's arithmetic.
       - name: Synthetic angle control
         run: python validate_angles.py synth
-
-      # Smoke test against the log corpus committed to the repo. Dry run, so it
-      # writes nothing.
-      - name: Legacy log migration (dry run)
-        run: python migrate_logs.py
