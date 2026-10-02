@@ -1,6 +1,18 @@
 # Core dependencies for Posture Analysis System
-opencv-python>=4.8.0
-mediapipe>=0.10.0
+#
+# The upper bounds are real, not caution. CI caught both on its first run, with
+# `mediapipe>=0.10.0` resolving to 1.0.1 and breaking every monitor at import.
+#
+# mediapipe <1.0   1.x REMOVED the legacy `mp.solutions` API that pose_core is
+#                  built on ("module 'mediapipe' has no attribute 'solutions'").
+#                  Lifting this bound means porting pose_core to the MediaPipe
+#                  Tasks API, which is a project rather than a version bump.
+# opencv-python <5  4.x is what this is developed and tested against. 5.0 is not
+#                  known to be broken - it imports fine - but nothing here
+#                  exercises it, and the monitors' VideoCapture and drawing calls
+#                  have no test coverage to catch a behavioural change.
+opencv-python>=4.8.0,<5.0
+mediapipe>=0.10.0,<1.0
 numpy>=1.24.0
 pandas>=2.0.0
 

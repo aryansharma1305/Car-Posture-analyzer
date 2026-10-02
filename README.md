@@ -112,8 +112,12 @@ guesses into their results.
 
 ## Install
 
-Developed and tested on Python 3.10. MediaPipe is the constraint on newer versions —
-check it has a wheel for your interpreter before upgrading.
+Developed and tested on Python 3.10.
+
+`requirements.txt` carries two upper bounds that matter: **`mediapipe<1.0`**, because
+1.x removed the legacy `mp.solutions` API `pose_core` is built on, and
+**`opencv-python<5.0`**, because 4.x is what the monitors are tested against. Lifting the
+MediaPipe bound means porting to its Tasks API — a project, not a version bump.
 
 ```bash
 git clone https://github.com/aryansharma1305/Car-Posture-analyzer.git
