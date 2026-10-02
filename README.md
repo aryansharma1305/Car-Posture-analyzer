@@ -114,10 +114,12 @@ guesses into their results.
 
 Developed and tested on Python 3.10.
 
-`requirements.txt` carries two upper bounds that matter: **`mediapipe<1.0`**, because
-1.x removed the legacy `mp.solutions` API `pose_core` is built on, and
-**`opencv-python<5.0`**, because 4.x is what the monitors are tested against. Lifting the
-MediaPipe bound means porting to its Tasks API — a project, not a version bump.
+`requirements.txt` carries upper bounds that matter. **`mediapipe<0.10.22`** — the
+`mp.solutions` API `pose_core` is built on was removed inside the 0.10.x line; 0.10.21
+works, 0.10.35 does not. **`opencv-contrib-python<5.0` as well as `opencv-python<5.0`** —
+MediaPipe pulls in the contrib distribution, and whichever cv2 is installed last wins
+`import cv2`, so bounding one without the other achieves nothing. Lifting the MediaPipe
+bound means porting to its Tasks API — a project, not a version bump.
 
 ```bash
 git clone https://github.com/aryansharma1305/Car-Posture-analyzer.git

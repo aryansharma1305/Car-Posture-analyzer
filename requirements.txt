@@ -1,18 +1,31 @@
 # Core dependencies for Posture Analysis System
 #
-# The upper bounds are real, not caution. CI caught both on its first run, with
-# `mediapipe>=0.10.0` resolving to 1.0.1 and breaking every monitor at import.
+# The upper bounds are verified, not cautious. CI found both on its first two
+# runs, and neither was visible locally because this machine's versions are held
+# in place by install history.
 #
-# mediapipe <1.0   1.x REMOVED the legacy `mp.solutions` API that pose_core is
-#                  built on ("module 'mediapipe' has no attribute 'solutions'").
-#                  Lifting this bound means porting pose_core to the MediaPipe
-#                  Tasks API, which is a project rather than a version bump.
-# opencv-python <5  4.x is what this is developed and tested against. 5.0 is not
-#                  known to be broken - it imports fine - but nothing here
-#                  exercises it, and the monitors' VideoCapture and drawing calls
-#                  have no test coverage to catch a behavioural change.
+# mediapipe <0.10.22
+#   `mp.solutions`, the API pose_core is built on, was REMOVED somewhere inside
+#   the 0.10.x line. 0.10.21 is verified working; 0.10.35 is verified broken
+#   ("module 'mediapipe' has no attribute 'solutions'"), as is 1.0.1. The exact
+#   breaking release is unknown, so the bound sits just above the last version
+#   known to work rather than pretending to more precision than that.
+#   Lifting it means porting pose_core to the MediaPipe Tasks API, which is a
+#   project rather than a version bump.
+#
+# opencv-contrib-python <5.0
+#   mediapipe depends on opencv-contrib-python, and whichever cv2 distribution
+#   is installed LAST wins `import cv2`. Pinning only opencv-python left the
+#   contrib 5.0.0 wheel shadowing our pinned 4.x, so cv2.__version__ reported
+#   5.0.0 regardless. Both have to be bounded or neither is.
+#
+# opencv-python <5.0
+#   4.x is what this is developed and tested against. 5.0 is not known to be
+#   broken, but nothing here exercises it and the monitors' VideoCapture and
+#   drawing calls have no test coverage to catch a behavioural change.
 opencv-python>=4.8.0,<5.0
-mediapipe>=0.10.0,<1.0
+opencv-contrib-python>=4.8.0,<5.0
+mediapipe>=0.10.0,<0.10.22
 numpy>=1.24.0
 pandas>=2.0.0
 
