@@ -181,6 +181,25 @@ python3 driver_comfort_reporter.py <session>.csv --report-type research
 A session whose frames all fall below the measurement threshold gets a refusal explaining
 why, not a report built from guesses.
 
+### Compare seats
+
+The research output. Groups every session by the `seat_id` in its sidecar, scores each
+under the model it was recorded with, and excludes unobservable frames:
+
+```console
+$ python3 compare_seats.py
+seat                    mean     sd    min    max  frames  excluded
+SEAT-BASELINE-B         95.2    0.7   94.1   96.4      30        10
+SEAT-PREMIUM-A         100.0    0.0  100.0  100.0      40         0
+
+SEAT-PREMIUM-A scores 4.8 points above SEAT-BASELINE-B.
+```
+
+Sessions recorded without `--seat-id` are listed as skipped rather than silently pooled.
+The difference is a difference of means with no significance test — read
+`validate_angles.py report` first to find out whether a gap that size is larger than the
+sensor's own error.
+
 ### Configure
 
 ```bash
@@ -240,6 +259,77 @@ leaving you to find out.
 
 ---
 
+## Validating the measurement
+
+Every number above is an estimate of a joint angle from a 2-D webcam. Until that
+estimate is compared against an independent reference, its accuracy is unknown — and a
+seat comparison built on an unvalidated sensor is not a finding. If the trunk estimate
+carries ±8° of error, the `DRIVING` ideal range is only 25° wide and a few points of
+difference between two seats means nothing.
+
+`validate_angles.py` answers three questions in order.
+
+**1. Is the arithmetic right?** No camera needed. It feeds `compute_angles` skeletons
+whose true angle is known exactly, isolating this project's own pixel-to-angle path:
+
+```console
+$ python3 validate_angles.py synth
+ recline  expected  measured    error
+     0.0     -0.00      0.00    0.000
+    25.0    -25.00    -25.00   -0.000
+    45.0    -45.00    -45.00    0.000
+
+worst torso error 0.0000 deg, worst limb/neck error 0.0000 deg
+PASS - the pixel-to-angle path is exact to within 0.01 deg.
+```
+
+That is the control. Because it passes, any error measured afterwards belongs to the
+camera and MediaPipe rather than to the code reading them.
+
+**2. Is the sensor accurate?** Read the protocol first — it covers camera siting,
+reference sources, and the sweep design:
+
+```bash
+python3 validate_angles.py protocol
+
+python3 validate_angles.py capture \
+    --recline 25 --reference-source sternum \
+    --subject-id S1 --camera-distance-cm 150
+```
+
+`--recline` is **degrees of recline from vertical, positive** — how a seat is specified.
+Upright is 0, a typical car backrest is 20–25. The conversion to `trunk_signed`
+(negative = reclined) happens in one function, because getting it backwards would invert
+every conclusion while still producing a plausible table.
+
+**3. Is it accurate *enough*?**
+
+```console
+$ python3 validate_angles.py report
+  bias (mean signed error)   +2.86 deg
+  between-trial SD           1.73 deg
+  95% limits of agreement    -0.53 to +6.26 deg
+  measured = 0.977 x truth + +2.45
+
+  DRIVING ideal trunk range  -30 to -5 deg (25 deg wide)
+  95% agreement width        6.8 deg (27% of the range)
+  VERDICT  Usable. Agreement is comfortably inside the ideal range.
+  with  5 trials per seat, smallest resolvable difference 2.2 deg
+```
+
+Three numbers carry the result. **Bias** is a systematic offset — correctable, and it
+cancels when comparing two seats, but it shifts a single seat against the cited ideal
+range. **SD** is what actually limits a seat comparison. **Slope** should be near 1.0;
+away from it means recline is compressed as it grows, which distorts comparisons across
+different recline settings even when bias is zero.
+
+Aggregation uses **one value per trial**, never per frame. Frames of a person sitting
+still are heavily correlated, so pooling them would shrink the error bar by √frames and
+make the sensor look far better than it is. The same reason the minimum-detectable-
+difference table counts separate sittings, not repeats without getting out of the seat.
+
+---
+
 ## Module map
 
 | Module | Responsibility |
@@ -264,6 +354,9 @@ leaving you to find out.
 | `posture_live_full.py` | **In-car monitor** (`DRIVING`) |
 | `posture_monitor_enhanced.py` | **Desk monitor** (`DESK`) |
 | `posture_live.py` | Early prototype, kept for reference |
+| `validate_angles.py` | **Measures the measurement**: bias, scatter, linearity, resolution verdict |
+| `validation_geometry.py` | Synthetic skeletons with an exactly known angle — the control |
+| `compare_seats.py` | Groups sessions by `seat_id` and compares comfort across seats |
 
 ---
 
@@ -286,6 +379,10 @@ fastest way to understand why a rule is shaped the way it is.
 
 ## Known limitations
 
+- **The sensor has not been validated yet.** `validate_angles.py` exists to fix this and
+  its arithmetic control passes, but no real trials have been recorded. Until they are, the
+  accuracy of every angle — and therefore of every comfort score and seat comparison — is
+  unknown. Run the protocol before trusting a number.
 - **Thresholds are stated, not calibrated.** The comfort category cut-offs (85/70/50), the
   per-degree score slopes, and `MIN_MEASURED_FRACTION = 0.5` are documented judgements. The
   joint *ranges* are cited; these are not, and calibrating them needs measured discomfort
